@@ -8,7 +8,7 @@ jobs:
 - job: WebApp
   displayName: 'Build Web App'
   pool:
-    vmImage: 'windows-2019'
+    vmImage: 'windows-latest'
 
   variables:
     BuildConfiguration: release
@@ -26,8 +26,6 @@ jobs:
     inputs:
       command: restore
       projects: '**/WebApp.csproj'
-
-  # ✅ Sonar removed (no service connection configured)
 
   - task: DotNetCoreCLI@2
     displayName: Build
@@ -62,10 +60,9 @@ jobs:
 - job: Database
   displayName: 'Build Database'
   pool:
-    vmImage: 'windows-2019'
+    vmImage: 'windows-latest'
 
   steps:
-  # ✅ FIX: Patch sqlproj TargetFrameworkVersion
   - powershell: |
       $proj = "$(Build.SourcesDirectory)\WebApp.Database\WebApp.Database.sqlproj"
       Write-Host "Patching sqlproj file: $proj"
@@ -106,7 +103,7 @@ jobs:
 - job: Selenium
   displayName: 'Build UI Tests'
   pool:
-    vmImage: 'windows-2019'
+    vmImage: 'windows-latest'
 
   steps:
   - task: NuGetToolInstaller@0
