@@ -27,13 +27,7 @@ jobs:
       command: restore
       projects: '**/WebApp.csproj'
 
-  # ✅ FIX: SonarCloud tasks version
-  - task: SonarCloudPrepare@4
-    displayName: 'Prepare analysis on SonarCloud'
-    inputs:
-      SonarCloud: SonarCloud
-      organization: houssemdellai
-      projectKey: WebAppWithDatabaseDemo
+  # ✅ Sonar removed (no service connection configured)
 
   - task: DotNetCoreCLI@2
     displayName: Build
@@ -56,12 +50,6 @@ jobs:
       arguments: '--configuration $(BuildConfiguration) --output $(build.artifactstagingdirectory)'
       zipAfterPublish: True
 
-  - task: SonarCloudAnalyze@4
-    displayName: 'Run Code Analysis'
-
-  - task: SonarCloudPublish@4
-    displayName: 'Publish Quality Gate Result'
-
   - task: PublishBuildArtifacts@1
     displayName: 'Publish Artifact (WebApp.zip)'
     inputs:
@@ -77,12 +65,12 @@ jobs:
     vmImage: 'windows-2019'
 
   steps:
+  # ✅ FIX: Patch sqlproj TargetFrameworkVersion
   - powershell: |
       $proj = "$(Build.SourcesDirectory)\WebApp.Database\WebApp.Database.sqlproj"
       Write-Host "Patching sqlproj file: $proj"
 
       [xml]$xml = Get-Content $proj
-
       $nodes = $xml.SelectNodes("//TargetFrameworkVersion")
 
       if ($nodes -and $nodes.Count -gt 0) {
@@ -97,7 +85,6 @@ jobs:
       }
       else {
         Write-Host "⚠️ No <TargetFrameworkVersion> found in sqlproj."
-        Write-Host "Please check SQLCLR Target Framework in Visual Studio."
       }
     displayName: 'FIX: Change SQLProj Target Framework to v4.8'
 
