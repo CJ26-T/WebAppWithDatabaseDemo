@@ -2,110 +2,158 @@ trigger: none
 pr: none
 
 jobs:
+# ============================================================
+# Job 1 : WebApp
+# ============================================================
 - job: WebApp
-  displayName: "Build Web App"
+  displayName: 'Build Web App'
   pool:
-    vmImage: windows-2022
+    vmImage: 'windows-2019'
 
   variables:
-    BuildConfiguration: Release
+    BuildConfiguration: release
 
   steps:
   - task: UseDotNet@2
-    displayName: "Install .NET 6 SDK"
+    displayName: Install .NET 6 sdk
     inputs:
       packageType: sdk
       version: 6.0.x
+      installationPath: $(Agent.ToolsDirectory)/dotnet
 
   - task: DotNetCoreCLI@2
-    displayName: "Restore"
+    displayName: Restore
     inputs:
       command: restore
-      projects: "**/WebApp.csproj"
+      projects: '**/WebApp.csproj'
 
-  - task: DotNetCoreCLI@2
-    displayName: "Build"
+  - task: SonarCloudPrepare@1
+    displayName: 'Prepare analysis on SonarCloud'
     inputs:
-      command: build
-      projects: "**/WebApp.csproj"
-      arguments: "--configuration $(BuildConfiguration)"
+      SonarCloud: SonarCloud
+      organization: houssemdellai
+      projectKey: WebAppWithDatabaseDemo
 
   - task: DotNetCoreCLI@2
-    displayName: "Test"
+    displayName: Build
+    inputs:
+      projects: '**/WebApp.csproj'
+      arguments: '--configuration $(BuildConfiguration)'
+
+  - task: DotNetCoreCLI@2
+    displayName: Test
     inputs:
       command: test
-      projects: "**/*UnitTest*.csproj"
-      arguments: "--configuration $(BuildConfiguration)"
+      projects: '**/*UnitTest*.csproj'
+      arguments: '--configuration $(BuildConfiguration)'
 
   - task: DotNetCoreCLI@2
-    displayName: "Publish (Zip)"
+    displayName: Publish
     inputs:
       command: publish
-      publishWebProjects: true
-      arguments: "--configuration $(BuildConfiguration) --output $(Build.ArtifactStagingDirectory)"
-      zipAfterPublish: true
+      publishWebProjects: True
+      arguments: '--configuration $(BuildConfiguration) --output $(build.artifactstagingdirectory)'
+      zipAfterPublish: True
+
+  - task: SonarCloudAnalyze@1
+    displayName: 'Run Code Analysis'
+
+  - task: SonarCloudPublish@1
+    displayName: 'Publish Quality Gate Result'
 
   - task: PublishBuildArtifacts@1
-    displayName: "Publish Artifact (WebApp.zip)"
+    displayName: 'Publish Artifact (WebApp.zip)'
     inputs:
-      PathtoPublish: "$(Build.ArtifactStagingDirectory)"
-      ArtifactName: "WebApp"
+      PathtoPublish: '$(build.artifactstagingdirectory)'
 
 
+# ============================================================
+# Job 2 : Database (FIXED)
+# ============================================================
 - job: Database
-  displayName: "Build Database (DACPAC)"
+  displayName: 'Build Database'
   pool:
-    vmImage: windows-2022
+    vmImage: 'windows-2019'
 
   steps:
+  # ✅ FIX: Patch sqlproj TargetFrameworkVersion
+  - powershell: |
+      $proj = "$(Build.SourcesDirectory)\WebApp.Database\WebApp.Database.sqlproj"
+      Write-Host "Patching sqlproj file: $proj"
+
+      [xml]$xml = Get-Content $proj
+
+      $nodes = $xml.SelectNodes("//TargetFrameworkVersion")
+
+      if ($nodes -and $nodes.Count -gt 0) {
+        foreach ($n in $nodes) {
+          Write-Host "Old TargetFrameworkVersion: $($n.InnerText)"
+          $n.InnerText = "v4.8"
+          Write-Host "New TargetFrameworkVersion: v4.8"
+        }
+
+        $xml.Save($proj)
+        Write-Host "✅ sqlproj patched successfully!"
+      }
+      else {
+        Write-Host "⚠️ No <TargetFrameworkVersion> found in sqlproj."
+        Write-Host "Please check SQLCLR Target Framework in Visual Studio."
+      }
+    displayName: 'FIX: Change SQLProj Target Framework to v4.8'
+
+  # Build Database Project
   - task: MSBuild@1
-    displayName: "Build .sqlproj"
+    displayName: 'Build WebApp.Database.sqlproj'
     inputs:
-      solution: "WebApp.Database/WebApp.Database.sqlproj"
-      msbuildArguments: "/p:OutDir=$(Build.ArtifactStagingDirectory)"
+      solution: WebApp.Database/WebApp.Database.sqlproj
+      msbuildArguments: '/p:OutDir=$(Build.ArtifactStagingDirectory)'
 
   - task: PublishBuildArtifacts@1
-    displayName: "Publish Artifact (DACPAC)"
+    displayName: 'Publish Artifact (Dacpac)'
     inputs:
-      PathtoPublish: "$(Build.ArtifactStagingDirectory)"
-      ArtifactName: "dacpac"
+      ArtifactName: dacpac
 
 
+# ============================================================
+# Job 3 : Selenium UI Tests
+# ============================================================
 - job: Selenium
-  displayName: "Build UI Tests"
+  displayName: 'Build UI Tests'
   pool:
-    vmImage: windows-2022
+    vmImage: 'windows-2019'
 
   steps:
-  - task: NuGetToolInstaller@1
-    displayName: "Install NuGet"
+  - task: NuGetToolInstaller@0
+    displayName: 'Use NuGet 4.3.0'
 
   - task: NuGetCommand@2
-    displayName: "NuGet Restore"
+    displayName: 'NuGet restore'
     inputs:
-      restoreSolution: "WebAppWithDatabase.sln"
+      restoreSolution: WebAppWithDatabase.sln
 
   - task: MSBuild@1
-    displayName: "Build Selenium UI Tests"
+    displayName: 'Build SeleniumUiTests.csproj'
     inputs:
-      solution: "SeleniumUiTests/SeleniumUiTests.csproj"
-      msbuildArguments: "/p:OutDir=$(Build.ArtifactStagingDirectory)"
+      solution: SeleniumUiTests/SeleniumUiTests.csproj
+      msbuildArguments: '/p:OutDir=$(Build.ArtifactStagingDirectory)'
 
   - task: PublishBuildArtifacts@1
-    displayName: "Publish Artifact (UI-Test)"
+    displayName: 'Publish Artifact: UI-Test'
     inputs:
-      PathtoPublish: "$(Build.ArtifactStagingDirectory)"
-      ArtifactName: "UI-Test"
+      ArtifactName: 'UI-Test'
 
 
+# ============================================================
+# Job 4 : Infrastructure
+# ============================================================
 - job: Infrastructure
-  displayName: "Publish Infrastructure Templates"
+  displayName: 'Copy Infrastructure files (ARM)'
   pool:
-    vmImage: windows-2022
+    vmImage: 'ubuntu-latest'
 
   steps:
   - task: PublishBuildArtifacts@1
-    displayName: "Publish Artifact (ARM Templates)"
+    displayName: 'Publish Artifact: ARM templates'
     inputs:
-      PathtoPublish: "AzureResourceGroupDeployment"
-      ArtifactName: "arm"
+      PathtoPublish: AzureResourceGroupDeployment
+      ArtifactName: arm
