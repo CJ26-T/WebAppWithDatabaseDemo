@@ -1,160 +1,304 @@
+# ❌ trigger: none 代表不會自動跑 CI（push 不會觸發）
+# 只能你手動 Run pipeline 才會跑
 trigger: none
+
+# ❌ pr: none 代表 PR 也不會自動觸發 pipeline
 pr: none
 
-jobs:
+# ✅ 全域變數（部署會用到）
+variables:
+  AzureServiceConnection: 'CJ26-AzureRM'
+
+  # 你原本第三階段用的命名邏輯，這裡保留（你可自行改）
+  Prefix: 'tunis'
+  ReleaseEnvironmentName: 'dev'
+  UniqueId: '1280' # 你也可以改成 $(Build.BuildId)
+
+  ResourceGroupName: '$(Prefix)-$(ReleaseEnvironmentName)-$(UniqueId)-RG'
+  WebAppName: '$(Prefix)-$(ReleaseEnvironmentName)-$(UniqueId)'
+  WebAppNameUrl: 'https://$(WebAppName).azurewebsites.net/'
+  SqlServerName: '$(Prefix)-sql-$(ReleaseEnvironmentName)-$(UniqueId)'
+  hostingPlanName: '$(Prefix)-service-plan'
+
+  DatabaseAdmin: 'houssem'
+  DatabasePassword: '@Aa123456'
+  DatabaseName: 'EmployeesDB'
+
+stages:
 # ============================================================
-# Job 1 : WebApp
+# Stage 1 : Build_Stage（你的第二階段內容 그대로 + artifact 名稱固定）
 # ============================================================
-- job: WebApp
-  displayName: 'Build Web App'
-  pool:
-    vmImage: 'windows-latest'
+- stage: Build_Stage
+  displayName: 'Build Stage'
+  jobs:
 
-  variables:
-    BuildConfiguration: release
+  # ============================================================
+  # Job 1 : WebApp（Build Web App）
+  # ============================================================
+  - job: WebApp
+    displayName: 'Build Web App'
+    pool:
+      vmImage: 'windows-latest'
+    variables:
+      BuildConfiguration: release
+    steps:
+    - task: UseDotNet@2
+      displayName: 'Install .NET 6 sdk'
+      inputs:
+        packageType: sdk
+        version: 6.0.x
+        installationPath: $(Agent.ToolsDirectory)/dotnet
 
-  steps:
-  - task: UseDotNet@2
-    displayName: Install .NET 6 sdk
-    inputs:
-      packageType: sdk
-      version: 6.0.x
-      installationPath: $(Agent.ToolsDirectory)/dotnet
+    - task: DotNetCoreCLI@2
+      displayName: 'Restore'
+      inputs:
+        command: restore
+        projects: '**/WebApp.csproj'
 
-  - task: DotNetCoreCLI@2
-    displayName: Restore
-    inputs:
-      command: restore
-      projects: '**/WebApp.csproj'
+    - task: DotNetCoreCLI@2
+      displayName: 'Build'
+      inputs:
+        projects: '**/WebApp.csproj'
+        arguments: '--configuration $(BuildConfiguration)'
 
-  - task: DotNetCoreCLI@2
-    displayName: Build
-    inputs:
-      projects: '**/WebApp.csproj'
-      arguments: '--configuration $(BuildConfiguration)'
+    - task: DotNetCoreCLI@2
+      displayName: 'Test'
+      inputs:
+        command: test
+        projects: '**/*UnitTest*.csproj'
+        arguments: '--configuration $(BuildConfiguration)'
 
-  - task: DotNetCoreCLI@2
-    displayName: Test
-    inputs:
-      command: test
-      projects: '**/*UnitTest*.csproj'
-      arguments: '--configuration $(BuildConfiguration)'
+    - task: DotNetCoreCLI@2
+      displayName: 'Publish'
+      inputs:
+        command: publish
+        publishWebProjects: true
+        arguments: '--configuration $(BuildConfiguration) --output $(Build.ArtifactStagingDirectory)'
+        zipAfterPublish: true
 
-  - task: DotNetCoreCLI@2
-    displayName: Publish
-    inputs:
-      command: publish
-      publishWebProjects: True
-      arguments: '--configuration $(BuildConfiguration) --output $(build.artifactstagingdirectory)'
-      zipAfterPublish: True
+    - task: PublishBuildArtifacts@1
+      displayName: 'Publish Artifact (WebApp.zip)'
+      inputs:
+        PathtoPublish: '$(Build.ArtifactStagingDirectory)'
+        ArtifactName: drop
 
-  - task: PublishBuildArtifacts@1
-    displayName: 'Publish Artifact (WebApp.zip)'
-    inputs:
-      PathtoPublish: '$(build.artifactstagingdirectory)'
+  # ============================================================
+  # Job 2 : Database（Build DACPAC）
+  # ============================================================
+  - job: Database
+    displayName: 'Build Database'
+    pool:
+      vmImage: 'windows-latest'
+    steps:
+    - powershell: |
+        $proj = "$(Build.SourcesDirectory)\WebApp.Database\WebApp.Database.sqlproj"
+        Write-Host "Patching sqlproj file: $proj"
+
+        if (!(Test-Path $proj)) {
+          Write-Error "sqlproj not found: $proj"
+          exit 1
+        }
+
+        $content = Get-Content -Raw -Encoding UTF8 $proj
+        $new = $content
+        $new = [regex]::Replace($new, "v4\.5(\.\d)?", "v4.8")
+        $new = [regex]::Replace($new, "(?<=>)4\.5(\.\d)?(?=<)", "4.8")
+
+        if ($new -ne $content) {
+          Set-Content -Path $proj -Value $new -Encoding UTF8
+          Write-Host "✅ Patched sqlproj framework references to v4.8"
+        }
+        else {
+          Write-Host "⚠️ No 4.5 patterns matched in sqlproj."
+        }
+      displayName: 'HARD FIX: Patch sqlproj to .NET Framework v4.8'
+
+    - task: MSBuild@1
+      displayName: 'Build WebApp.Database.sqlproj'
+      inputs:
+        solution: WebApp.Database/WebApp.Database.sqlproj
+        msbuildArguments: '/p:OutDir=$(Build.ArtifactStagingDirectory)'
+
+    - task: PublishBuildArtifacts@1
+      displayName: 'Publish Artifact (Dacpac)'
+      inputs:
+        PathtoPublish: '$(Build.ArtifactStagingDirectory)'
+        ArtifactName: dacpac
+
+  # ============================================================
+  # Job 3 : Selenium UI Tests（UI 測試 build）
+  # ============================================================
+  - job: Selenium
+    displayName: 'Build UI Tests'
+    pool:
+      vmImage: 'windows-latest'
+    steps:
+    - task: NuGetToolInstaller@1
+      displayName: 'Use NuGet'
+
+    - task: NuGetCommand@2
+      displayName: 'NuGet restore'
+      inputs:
+        restoreSolution: WebAppWithDatabase.sln
+
+    - task: MSBuild@1
+      displayName: 'Build SeleniumUiTests.csproj'
+      inputs:
+        solution: SeleniumUiTests/SeleniumUiTests.csproj
+        msbuildArguments: '/p:OutDir=$(Build.ArtifactStagingDirectory)'
+
+    - task: PublishBuildArtifacts@1
+      displayName: 'Publish Artifact: UI-Test'
+      inputs:
+        PathtoPublish: '$(Build.ArtifactStagingDirectory)'
+        ArtifactName: ui-tests
+
+  # ============================================================
+  # Job 4 : Infrastructure（ARM templates）
+  # ============================================================
+  - job: Infrastructure
+    displayName: 'Publish Infra files (ARM)'
+    pool:
+      vmImage: 'ubuntu-latest'
+    steps:
+    - task: PublishBuildArtifacts@1
+      displayName: 'Publish Artifact: ARM templates'
+      inputs:
+        PathtoPublish: AzureResourceGroupDeployment
+        ArtifactName: arm
 
 
 # ============================================================
-# Job 2 : Database (FIXED HARD)
+# Stage 2 : Deploy_Dev（新增：真正部署 + 跑 Selenium）
 # ============================================================
-- job: Database
-  displayName: 'Build Database'
-  pool:
-    vmImage: 'windows-latest'
+- stage: Dev_Stage
+  displayName: 'Create & Deploy to Dev'
+  dependsOn: Build_Stage
+  jobs:
 
-  steps:
-  # ✅ HARD FIX: Patch .sqlproj targeting framework (replace any 4.5 / v4.5 / v4.5.x to v4.8)
-  - powershell: |
-      $proj = "$(Build.SourcesDirectory)\WebApp.Database\WebApp.Database.sqlproj"
-      Write-Host "Patching sqlproj file: $proj"
+  # -------------------------
+  # Job: Create_DEV (ARM 部署 Resource Group & infra)
+  # -------------------------
+  - job: Create_DEV
+    displayName: 'Create DEV (ARM Deploy)'
+    pool:
+      vmImage: 'windows-latest'
+    steps:
+    - checkout: none
 
-      if (!(Test-Path $proj)) {
-        Write-Error "sqlproj not found: $proj"
-        exit 1
-      }
+    - task: DownloadBuildArtifacts@0
+      displayName: 'Download ARM templates'
+      inputs:
+        buildType: 'current'
+        downloadType: 'single'
+        artifactName: 'arm'
+        downloadPath: '$(System.DefaultWorkingDirectory)'
 
-      $content = Get-Content -Raw -Encoding UTF8 $proj
+    - task: AzureResourceGroupDeployment@2
+      displayName: 'Deploy ARM templates'
+      inputs:
+        azureSubscription: '$(AzureServiceConnection)'
+        action: 'Create Or Update Resource Group'
+        resourceGroupName: '$(ResourceGroupName)'
+        location: 'West Europe'
+        templateLocation: 'Linked artifact'
+        csmFile: '$(System.DefaultWorkingDirectory)/arm/WebSiteSQLDatabase.json'
+        csmParametersFile: '$(System.DefaultWorkingDirectory)/arm/WebSiteSQLDatabase.parameters.json'
+        overrideParameters: >
+          -hostingPlanName $(hostingPlanName)
+          -skuName "F1"
+          -skuCapacity 1
+          -administratorLogin $(DatabaseAdmin)
+          -administratorLoginPassword $(DatabasePassword)
+          -databaseName $(DatabaseName)
+          -collation "SQL_Latin1_General_CP1_CI_AS"
+          -edition "Basic"
+          -maxSizeBytes "1073741824"
+          -requestedServiceObjectiveName "Basic"
+          -webSiteName $(WebAppName)
+          -sqlserverName $(SqlServerName)
+        deploymentMode: 'Incremental'
 
-      Write-Host "---- Before (lines containing 4.5 / TargetFramework / SqlClr) ----"
-      ($content -split "`r?`n") |
-        Where-Object { $_ -match "4\.5" -or $_ -match "TargetFramework" -or $_ -match "SqlClr" } |
-        Select-Object -First 80 |
-        ForEach-Object { Write-Host $_ }
+  # -------------------------
+  # Job: Deploy_DEV (WebApp + Dacpac)
+  # -------------------------
+  - job: Deploy_DEV
+    displayName: 'Deploy Apps to DEV'
+    dependsOn: Create_DEV
+    pool:
+      vmImage: 'windows-latest'
+    steps:
+    - checkout: none
 
-      # Replace common patterns:
-      # v4.5 / 4.5 / v4.5.1 / v4.5.2 -> v4.8
-      $new = $content
-      $new = [regex]::Replace($new, "v4\.5(\.\d)?", "v4.8")
-      $new = [regex]::Replace($new, "(?<=>)4\.5(\.\d)?(?=<)", "4.8")
+    - task: DownloadBuildArtifacts@0
+      displayName: 'Download WebApp.zip'
+      inputs:
+        buildType: 'current'
+        downloadType: 'single'
+        artifactName: 'drop'
+        downloadPath: '$(System.DefaultWorkingDirectory)'
 
-      if ($new -ne $content) {
-        Set-Content -Path $proj -Value $new -Encoding UTF8
-        Write-Host "✅ Patched sqlproj framework references to v4.8"
-      }
-      else {
-        Write-Host "⚠️ No 4.5 patterns matched in sqlproj. (It might still be set elsewhere, but we'll try build.)"
-      }
+    - task: AzureRmWebAppDeployment@4
+      displayName: 'Deploy WebApp to Azure'
+      inputs:
+        azureSubscription: '$(AzureServiceConnection)'
+        appType: 'webApp'
+        WebAppName: '$(WebAppName)'
+        Package: '$(System.DefaultWorkingDirectory)/drop/WebApp.zip'
+        TakeAppOfflineFlag: true
 
-      $after = Get-Content -Raw -Encoding UTF8 $proj
-      Write-Host "---- After (lines containing 4.8 / TargetFramework / SqlClr) ----"
-      ($after -split "`r?`n") |
-        Where-Object { $_ -match "4\.8" -or $_ -match "TargetFramework" -or $_ -match "SqlClr" } |
-        Select-Object -First 80 |
-        ForEach-Object { Write-Host $_ }
-    displayName: 'HARD FIX: Patch sqlproj to .NET Framework v4.8'
+    - task: DownloadBuildArtifacts@0
+      displayName: 'Download DacPac'
+      inputs:
+        buildType: 'current'
+        downloadType: 'single'
+        artifactName: 'dacpac'
+        downloadPath: '$(System.DefaultWorkingDirectory)'
 
-  - task: MSBuild@1
-    displayName: 'Build WebApp.Database.sqlproj'
-    inputs:
-      solution: WebApp.Database/WebApp.Database.sqlproj
-      msbuildArguments: '/p:OutDir=$(Build.ArtifactStagingDirectory)'
+    - task: SqlAzureDacpacDeployment@1
+      displayName: 'Deploy DacPac to SQL Azure'
+      inputs:
+        azureSubscription: '$(AzureServiceConnection)'
+        AuthenticationType: 'server'
+        ServerName: '$(SqlServerName).database.windows.net,1433'
+        DatabaseName: '$(DatabaseName)'
+        SqlUsername: '$(DatabaseAdmin)'
+        SqlPassword: '$(DatabasePassword)'
+        deployType: 'DacpacTask'
+        DeploymentAction: 'Publish'
+        DacpacFile: '$(System.DefaultWorkingDirectory)/dacpac/WebApp.Database.dacpac'
+        IpDetectionMethod: 'AutoDetect'
 
-  - task: PublishBuildArtifacts@1
-    displayName: 'Publish Artifact (Dacpac)'
-    inputs:
-      ArtifactName: dacpac
+  # -------------------------
+  # Job: Test_DEV (Run Selenium tests)
+  # -------------------------
+  - job: Test_DEV
+    displayName: 'Run Selenium tests in DEV'
+    dependsOn: Deploy_DEV
+    pool:
+      vmImage: 'windows-latest'
+    steps:
+    - checkout: none
 
+    - task: DownloadBuildArtifacts@0
+      displayName: 'Download Selenium Tests'
+      inputs:
+        buildType: 'current'
+        downloadType: 'single'
+        artifactName: 'ui-tests'
+        downloadPath: '$(System.DefaultWorkingDirectory)'
 
-# ============================================================
-# Job 3 : Selenium UI Tests
-# ============================================================
-- job: Selenium
-  displayName: 'Build UI Tests'
-  pool:
-    vmImage: 'windows-latest'
-
-  steps:
-  - task: NuGetToolInstaller@1
-    displayName: 'Use NuGet'
-
-  - task: NuGetCommand@2
-    displayName: 'NuGet restore'
-    inputs:
-      restoreSolution: WebAppWithDatabase.sln
-
-  - task: MSBuild@1
-    displayName: 'Build SeleniumUiTests.csproj'
-    inputs:
-      solution: SeleniumUiTests/SeleniumUiTests.csproj
-      msbuildArguments: '/p:OutDir=$(Build.ArtifactStagingDirectory)'
-
-  - task: PublishBuildArtifacts@1
-    displayName: 'Publish Artifact: UI-Test'
-    inputs:
-      ArtifactName: 'UI-Test'
-
-
-# ============================================================
-# Job 4 : Infrastructure
-# ============================================================
-- job: Infrastructure
-  displayName: 'Copy Infrastructure files (ARM)'
-  pool:
-    vmImage: 'ubuntu-latest'
-
-  steps:
-  - task: PublishBuildArtifacts@1
-    displayName: 'Publish Artifact: ARM templates'
-    inputs:
-      PathtoPublish: AzureResourceGroupDeployment
-      ArtifactName: arm
+    - task: VSTest@2
+      displayName: 'Run Selenium UI Tests'
+      inputs:
+        testSelector: 'testAssemblies'
+        searchFolder: '$(System.DefaultWorkingDirectory)/ui-tests'
+        testAssemblyVer2: |
+          **\*Test*.dll
+          !**\*TestAdapter.dll
+          !**\obj\**
+        runInParallel: false
+        codeCoverageEnabled: false
+        # 你的測試如果需要 URL 參數，等你有 runsettings 再加回去
+        # runSettingsFile: '$(System.DefaultWorkingDirectory)/ui-tests/.runsettings'
+        # overrideTestrunParameters: '-webAppUrl $(WebAppNameUrl)'
