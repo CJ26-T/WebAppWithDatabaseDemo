@@ -55,7 +55,7 @@ jobs:
 
 
 # ============================================================
-# Job 2 : Database (FIXED)
+# Job 2 : Database (FIXED HARD)
 # ============================================================
 - job: Database
   displayName: 'Build Database'
@@ -63,27 +63,45 @@ jobs:
     vmImage: 'windows-latest'
 
   steps:
+  # ✅ HARD FIX: Patch .sqlproj targeting framework (replace any 4.5 / v4.5 / v4.5.x to v4.8)
   - powershell: |
       $proj = "$(Build.SourcesDirectory)\WebApp.Database\WebApp.Database.sqlproj"
       Write-Host "Patching sqlproj file: $proj"
 
-      [xml]$xml = Get-Content $proj
-      $nodes = $xml.SelectNodes("//TargetFrameworkVersion")
+      if (!(Test-Path $proj)) {
+        Write-Error "sqlproj not found: $proj"
+        exit 1
+      }
 
-      if ($nodes -and $nodes.Count -gt 0) {
-        foreach ($n in $nodes) {
-          Write-Host "Old TargetFrameworkVersion: $($n.InnerText)"
-          $n.InnerText = "v4.8"
-          Write-Host "New TargetFrameworkVersion: v4.8"
-        }
+      $content = Get-Content -Raw -Encoding UTF8 $proj
 
-        $xml.Save($proj)
-        Write-Host "✅ sqlproj patched successfully!"
+      Write-Host "---- Before (lines containing 4.5 / TargetFramework / SqlClr) ----"
+      ($content -split "`r?`n") |
+        Where-Object { $_ -match "4\.5" -or $_ -match "TargetFramework" -or $_ -match "SqlClr" } |
+        Select-Object -First 80 |
+        ForEach-Object { Write-Host $_ }
+
+      # Replace common patterns:
+      # v4.5 / 4.5 / v4.5.1 / v4.5.2 -> v4.8
+      $new = $content
+      $new = [regex]::Replace($new, "v4\.5(\.\d)?", "v4.8")
+      $new = [regex]::Replace($new, "(?<=>)4\.5(\.\d)?(?=<)", "4.8")
+
+      if ($new -ne $content) {
+        Set-Content -Path $proj -Value $new -Encoding UTF8
+        Write-Host "✅ Patched sqlproj framework references to v4.8"
       }
       else {
-        Write-Host "⚠️ No <TargetFrameworkVersion> found in sqlproj."
+        Write-Host "⚠️ No 4.5 patterns matched in sqlproj. (It might still be set elsewhere, but we'll try build.)"
       }
-    displayName: 'FIX: Change SQLProj Target Framework to v4.8'
+
+      $after = Get-Content -Raw -Encoding UTF8 $proj
+      Write-Host "---- After (lines containing 4.8 / TargetFramework / SqlClr) ----"
+      ($after -split "`r?`n") |
+        Where-Object { $_ -match "4\.8" -or $_ -match "TargetFramework" -or $_ -match "SqlClr" } |
+        Select-Object -First 80 |
+        ForEach-Object { Write-Host $_ }
+    displayName: 'HARD FIX: Patch sqlproj to .NET Framework v4.8'
 
   - task: MSBuild@1
     displayName: 'Build WebApp.Database.sqlproj'
@@ -106,8 +124,8 @@ jobs:
     vmImage: 'windows-latest'
 
   steps:
-  - task: NuGetToolInstaller@0
-    displayName: 'Use NuGet 4.3.0'
+  - task: NuGetToolInstaller@1
+    displayName: 'Use NuGet'
 
   - task: NuGetCommand@2
     displayName: 'NuGet restore'
