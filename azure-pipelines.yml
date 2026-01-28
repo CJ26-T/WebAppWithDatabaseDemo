@@ -1,48 +1,111 @@
-trigger: none  # disable CI builds entirely
+trigger: none
+pr: none
 
-pool:
-  vmImage: windows-2022   # ✅ windows-2019 retired, use 2022
+jobs:
+- job: WebApp
+  displayName: "Build Web App"
+  pool:
+    vmImage: windows-2022
 
-variables:
-  BuildConfiguration: Release
+  variables:
+    BuildConfiguration: Release
 
-steps:
-- task: UseDotNet@2
-  displayName: Install .NET 6 sdk
-  inputs:
-    packageType: sdk
-    version: 6.0.x
-    installationPath: $(Agent.ToolsDirectory)/dotnet
+  steps:
+  - task: UseDotNet@2
+    displayName: "Install .NET 6 SDK"
+    inputs:
+      packageType: sdk
+      version: 6.0.x
 
-- task: DotNetCoreCLI@2
-  displayName: Restore Nuget Packages
-  inputs:
-    command: restore
-    projects: '**/WebApp.csproj'
+  - task: DotNetCoreCLI@2
+    displayName: "Restore"
+    inputs:
+      command: restore
+      projects: "**/WebApp.csproj"
 
-- task: DotNetCoreCLI@2
-  displayName: Build Web App
-  inputs:
-    command: build
-    projects: '**/WebApp.csproj'
-    arguments: '--configuration $(BuildConfiguration)'
+  - task: DotNetCoreCLI@2
+    displayName: "Build"
+    inputs:
+      command: build
+      projects: "**/WebApp.csproj"
+      arguments: "--configuration $(BuildConfiguration)"
 
-- task: DotNetCoreCLI@2
-  displayName: Run Unit Tests
-  inputs:
-    command: test
-    projects: '**/*UnitTest*.csproj'
-    arguments: '--configuration $(BuildConfiguration)'
+  - task: DotNetCoreCLI@2
+    displayName: "Test"
+    inputs:
+      command: test
+      projects: "**/*UnitTest*.csproj"
+      arguments: "--configuration $(BuildConfiguration)"
 
-- task: DotNetCoreCLI@2
-  displayName: Create Web App Package (.zip)
-  inputs:
-    command: publish
-    publishWebProjects: true
-    arguments: '--configuration $(BuildConfiguration) --output $(Build.ArtifactStagingDirectory)'
-    zipAfterPublish: true
+  - task: DotNetCoreCLI@2
+    displayName: "Publish (Zip)"
+    inputs:
+      command: publish
+      publishWebProjects: true
+      arguments: "--configuration $(BuildConfiguration) --output $(Build.ArtifactStagingDirectory)"
+      zipAfterPublish: true
 
-- task: PublishBuildArtifacts@1
-  displayName: Publish Artifact (WebApp.zip)
-  inputs:
-    PathtoPublish: '$(Build.ArtifactStagingDirectory)'
+  - task: PublishBuildArtifacts@1
+    displayName: "Publish Artifact (WebApp.zip)"
+    inputs:
+      PathtoPublish: "$(Build.ArtifactStagingDirectory)"
+      ArtifactName: "WebApp"
+
+
+- job: Database
+  displayName: "Build Database (DACPAC)"
+  pool:
+    vmImage: windows-2022
+
+  steps:
+  - task: MSBuild@1
+    displayName: "Build .sqlproj"
+    inputs:
+      solution: "WebApp.Database/WebApp.Database.sqlproj"
+      msbuildArguments: "/p:OutDir=$(Build.ArtifactStagingDirectory)"
+
+  - task: PublishBuildArtifacts@1
+    displayName: "Publish Artifact (DACPAC)"
+    inputs:
+      PathtoPublish: "$(Build.ArtifactStagingDirectory)"
+      ArtifactName: "dacpac"
+
+
+- job: Selenium
+  displayName: "Build UI Tests"
+  pool:
+    vmImage: windows-2022
+
+  steps:
+  - task: NuGetToolInstaller@1
+    displayName: "Install NuGet"
+
+  - task: NuGetCommand@2
+    displayName: "NuGet Restore"
+    inputs:
+      restoreSolution: "WebAppWithDatabase.sln"
+
+  - task: MSBuild@1
+    displayName: "Build Selenium UI Tests"
+    inputs:
+      solution: "SeleniumUiTests/SeleniumUiTests.csproj"
+      msbuildArguments: "/p:OutDir=$(Build.ArtifactStagingDirectory)"
+
+  - task: PublishBuildArtifacts@1
+    displayName: "Publish Artifact (UI-Test)"
+    inputs:
+      PathtoPublish: "$(Build.ArtifactStagingDirectory)"
+      ArtifactName: "UI-Test"
+
+
+- job: Infrastructure
+  displayName: "Publish Infrastructure Templates"
+  pool:
+    vmImage: windows-2022
+
+  steps:
+  - task: PublishBuildArtifacts@1
+    displayName: "Publish Artifact (ARM Templates)"
+    inputs:
+      PathtoPublish: "AzureResourceGroupDeployment"
+      ArtifactName: "arm"
