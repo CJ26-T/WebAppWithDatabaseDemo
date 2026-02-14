@@ -40,6 +40,10 @@ variables:
   # Azure DevOps service connection name
   azureSubscription: WebAppWithDatabaseDemo_spn
 
+  # ✅ FIX: Region/location 抽成變數（避免 West Europe 被擋）
+  # 可改成：southeastasia / northeurope / japaneast / australiaeast ...（以你訂閱允許為準）
+  Location: eastus
+
   # Deployment naming
   Prefix: tunis
   EnvironmentName: dev
@@ -218,7 +222,8 @@ stages:
               azureSubscription: $(azureSubscription)
               action: Create Or Update Resource Group
               resourceGroupName: $(ResourceGroupName)
-              location: West Europe
+              # ✅ FIX: 改用變數 Location
+              location: $(Location)
               templateLocation: Linked artifact
               csmFile: $(System.DefaultWorkingDirectory)/WebSiteSQLDatabase.json
               csmParametersFile: $(System.DefaultWorkingDirectory)/WebSiteSQLDatabase.parameters.json
@@ -292,7 +297,8 @@ stages:
               azureResourceManagerConnection: $(azureSubscription)
               action: Create Or Update Resource Group
               resourceGroupName: $(ResourceGroupName)
-              location: West Europe
+              # ✅ FIX: 改用變數 Location
+              location: $(Location)
               templateLocation: Linked artifact
               csmFile: $(System.DefaultWorkingDirectory)/WebSiteSQLDatabase.json
               csmParametersFile: $(System.DefaultWorkingDirectory)/WebSiteSQLDatabase.parameters.json
