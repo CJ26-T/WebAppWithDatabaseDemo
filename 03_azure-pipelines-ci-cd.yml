@@ -123,11 +123,33 @@ stages:
         steps:
           - checkout: self
 
+          - task: NuGetToolInstaller@1
+            displayName: Install NuGet (for net45 reference assemblies)
+
+          - pwsh: |
+              Set-StrictMode -Version Latest
+              $ErrorActionPreference = 'Stop'
+
+              $outRoot = Join-Path "$(Agent.TempDirectory)" 'refasms'
+              New-Item -ItemType Directory -Force -Path $outRoot | Out-Null
+
+              # Provides .NET Framework 4.5 reference assemblies on hosted agents that don't ship them.
+              nuget install Microsoft.NETFramework.ReferenceAssemblies.net45 -OutputDirectory $outRoot -ExcludeVersion
+
+              $net45Path = Join-Path $outRoot 'Microsoft.NETFramework.ReferenceAssemblies.net45\build\.NETFramework\v4.5'
+              if (-not (Test-Path $net45Path)) {
+                throw "Expected net45 reference assemblies at: $net45Path"
+              }
+
+              Write-Host "Using FrameworkPathOverride=$net45Path"
+              Write-Host "##vso[task.setvariable variable=FrameworkPathOverride]$net45Path"
+            displayName: Provide .NET Framework 4.5 reference assemblies
+
           - task: MSBuild@1
             displayName: Build WebApp.Database.sqlproj
             inputs:
               solution: WebApp.Database/WebApp.Database.sqlproj
-              msbuildArguments: /p:OutDir=$(Build.ArtifactStagingDirectory)
+              msbuildArguments: /p:OutDir=$(Build.ArtifactStagingDirectory) /p:FrameworkPathOverride=$(FrameworkPathOverride)
 
           - task: PublishPipelineArtifact@1
             displayName: Publish Artifact (Dacpac)
