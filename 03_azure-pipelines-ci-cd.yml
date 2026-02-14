@@ -32,24 +32,30 @@ parameters:
 
 variables:
   BuildConfiguration: release
+
+  # Azure DevOps service connection name
   azureSubscription: WebAppWithDatabaseDemo_spn
 
-  # ✅ 你想用的 region（先填一個常見的代碼）
-  # 你可以改成：eastasia / southeastasia / japaneast / australiasoutheast / northeurope ...
+  # ✅ 解法1關鍵：固定使用一個你訂閱允許的 region（用代碼）
+  # 可改：southeastasia / japaneast / eastasia / northeurope / australiaeast ...
   Location: eastus
 
   Prefix: tunis
   EnvironmentName: dev
-  UniqueId: '1280'
 
-  ResourceGroupName: $(Prefix)-$(EnvironmentName)-$(UniqueId)-RG
+  # ✅ 建議：避免重跑撞名
+  UniqueId: $(Build.BuildId)
+
+  # ✅ 解法1關鍵：RG 名稱包含 Location，避免舊 RG 卡死在 westeurope
+  ResourceGroupName: $(Prefix)-$(EnvironmentName)-$(UniqueId)-$(Location)-RG
+
   WebAppName: $(Prefix)-$(EnvironmentName)-$(UniqueId)
   WebAppNameUrl: https://$(WebAppName).azurewebsites.net/
   SqlServerName: $(Prefix)-sql-$(EnvironmentName)-$(UniqueId)
   hostingPlanName: $(Prefix)-service-plan
 
   Database.Admin: houssem
-  Database.Password: '@Aa123456'
+  Database.Password: '@Aa123456' # 請改成 secret variable / variable group
   Database.Name: EmployeesDB
 
 stages:
@@ -62,6 +68,7 @@ stages:
           vmImage: windows-2022
         steps:
           - checkout: self
+
           - task: UseDotNet@2
             displayName: Install .NET 6 SDK
             inputs:
@@ -179,6 +186,7 @@ stages:
           vmImage: ubuntu-22.04
         steps:
           - checkout: self
+
           - task: PublishPipelineArtifact@1
             displayName: Publish Artifact (ARM templates)
             inputs:
@@ -202,9 +210,9 @@ stages:
               artifact: arm
               path: $(System.DefaultWorkingDirectory)
 
-          # ✅ NEW：挑選「訂閱允許」的 region，並建立 RG（同時把最後採用的 region 印出來）
+          # ✅ 解法1：只印 locations + 建 RG（RG 名稱已含 location，不會撞舊的 westeurope RG）
           - task: AzureCLI@2
-            displayName: Pick eligible region + create RG
+            displayName: Print allowed locations + create RG
             inputs:
               azureSubscription: $(azureSubscription)
               scriptType: bash
@@ -212,30 +220,15 @@ stages:
               inlineScript: |
                 set -e
 
-                echo "== Subscription =="
+                echo "Subscription:"
                 az account show --query "{name:name, id:id, tenantId:tenantId}" -o json
 
-                echo "== Allowed locations (top 30) =="
+                echo "Allowed locations (top 30):"
                 az account list-locations --query "[0:30].{name:name, displayName:displayName}" -o table
 
-                TARGET="$(Location)"
-                echo "Requested location: $TARGET"
-
-                OK=$(az account list-locations --query "[?name=='$TARGET'] | length(@)" -o tsv)
-                if [ "$OK" != "1" ]; then
-                  echo "##vso[task.logissue type=warning]Location '$TARGET' not allowed. Falling back to 'southeastasia'."
-                  TARGET="southeastasia"
-                  OK2=$(az account list-locations --query "[?name=='$TARGET'] | length(@)" -o tsv)
-                  if [ "$OK2" != "1" ]; then
-                    echo "##vso[task.logissue type=warning]Fallback 'southeastasia' not allowed. Falling back to 'eastus'."
-                    TARGET="eastus"
-                  fi
-                fi
-
-                echo "Using location: $TARGET"
-                echo "##vso[task.setvariable variable=Location]$TARGET"
-
-                az group create -n "$(ResourceGroupName)" -l "$TARGET" -o table
+                echo "Using Location: $(Location)"
+                echo "Creating/Updating RG: $(ResourceGroupName) in $(Location)"
+                az group create -n "$(ResourceGroupName)" -l "$(Location)" -o table
 
           - task: AzureResourceGroupDeployment@2
             displayName: Validate ARM templates
@@ -266,6 +259,7 @@ stages:
               - pwsh: |
                   Set-StrictMode -Version Latest
                   $ErrorActionPreference = 'Stop'
+
                   Install-Module PSRule -Scope CurrentUser -Force -AllowClobber
                   Install-Module PSRule.Rules.Azure -Scope CurrentUser -Force -AllowClobber
 
@@ -292,6 +286,7 @@ stages:
               workingDirectory: $(System.DefaultWorkingDirectory)
               inlineScript: |
                 set -e
+                echo "Using RG: $(ResourceGroupName)"
                 echo "Using location: $(Location)"
                 az deployment group what-if \
                   --resource-group "$(ResourceGroupName)" \
