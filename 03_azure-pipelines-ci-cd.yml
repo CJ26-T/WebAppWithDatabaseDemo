@@ -78,7 +78,6 @@ stages:
               command: restore
               projects: '**/WebApp.csproj'
 
-          # Replacement for WhiteSource/Mend task: basic vulnerability report via .NET CLI.
           - ${{ if parameters.runCompletePipeline }}:
               - pwsh: |
                   $proj = Get-ChildItem -Recurse -Filter WebApp.csproj | Select-Object -First 1
@@ -133,7 +132,6 @@ stages:
               $outRoot = Join-Path "$(Agent.TempDirectory)" 'refasms'
               New-Item -ItemType Directory -Force -Path $outRoot | Out-Null
 
-              # Provides .NET Framework 4.5 reference assemblies on hosted agents that don't ship them.
               nuget install Microsoft.NETFramework.ReferenceAssemblies.net45 -OutputDirectory $outRoot -ExcludeVersion
 
               $net45Path = Join-Path $outRoot 'Microsoft.NETFramework.ReferenceAssemblies.net45\build\.NETFramework\v4.5'
@@ -222,8 +220,8 @@ stages:
               resourceGroupName: $(ResourceGroupName)
               location: West Europe
               templateLocation: Linked artifact
-              csmFile: $(System.DefaultWorkingDirectory)/arm/WebSiteSQLDatabase.json
-              csmParametersFile: $(System.DefaultWorkingDirectory)/arm/WebSiteSQLDatabase.parameters.json
+              csmFile: $(System.DefaultWorkingDirectory)/WebSiteSQLDatabase.json
+              csmParametersFile: $(System.DefaultWorkingDirectory)/WebSiteSQLDatabase.parameters.json
               overrideParameters: >
                 -hostingPlanName $(hostingPlanName)
                 -skuName "F1"
@@ -239,7 +237,6 @@ stages:
                 -sqlserverName $(SqlServerName)
               deploymentMode: Validation
 
-          # Replacement for AzSKARMTemplateChecker + RunARMTTKTests: PSRule scan (no Marketplace tasks).
           - ${{ if and(parameters.runCompletePipeline, parameters.templateScanEnabled) }}:
               - pwsh: |
                   Set-StrictMode -Version Latest
@@ -248,7 +245,7 @@ stages:
                   Install-Module PSRule -Scope CurrentUser -Force -AllowClobber
                   Install-Module PSRule.Rules.Azure -Scope CurrentUser -Force -AllowClobber
 
-                  $armPath = Join-Path "$(System.DefaultWorkingDirectory)" 'arm'
+                  $armPath = "$(System.DefaultWorkingDirectory)"
                   $outDir = Join-Path $armPath 'results'
                   New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 
@@ -260,7 +257,7 @@ stages:
             condition: always()
             inputs:
               testResultsFormat: NUnit
-              testResultsFiles: $(System.DefaultWorkingDirectory)/arm/results/*.xml
+              testResultsFiles: $(System.DefaultWorkingDirectory)/results/*.xml
 
           - task: AzureCLI@2
             displayName: Preview Template Changes (What-If)
@@ -268,7 +265,7 @@ stages:
               azureSubscription: $(azureSubscription)
               scriptType: bash
               scriptLocation: inlineScript
-              workingDirectory: $(System.DefaultWorkingDirectory)/arm/
+              workingDirectory: $(System.DefaultWorkingDirectory)
               inlineScript: |
                 az deployment group what-if \
                   --resource-group "$(ResourceGroupName)" \
@@ -297,8 +294,8 @@ stages:
               resourceGroupName: $(ResourceGroupName)
               location: West Europe
               templateLocation: Linked artifact
-              csmFile: $(System.DefaultWorkingDirectory)/arm/WebSiteSQLDatabase.json
-              csmParametersFile: $(System.DefaultWorkingDirectory)/arm/WebSiteSQLDatabase.parameters.json
+              csmFile: $(System.DefaultWorkingDirectory)/WebSiteSQLDatabase.json
+              csmParametersFile: $(System.DefaultWorkingDirectory)/WebSiteSQLDatabase.parameters.json
               overrideParameters: >
                 -hostingPlanName $(hostingPlanName)
                 -skuName "F1"
