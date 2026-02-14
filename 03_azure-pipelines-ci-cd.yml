@@ -31,23 +31,16 @@ parameters:
     default: false
 
 variables:
-  # Recommended: create a Variable Group in Azure DevOps and store secrets there.
-  # Then uncomment the next line and remove hardcoded values below.
-  # - group: WebAppWithDatabaseDemo-Secrets
-
   BuildConfiguration: release
-
-  # Azure DevOps service connection name
   azureSubscription: WebAppWithDatabaseDemo_spn
 
-  # ✅ FIX: Region/location 抽成變數（避免 West Europe 被擋）
-  # 可改成：southeastasia / northeurope / japaneast / australiaeast ...（以你訂閱允許為準）
+  # ✅ 你想用的 region（先填一個常見的代碼）
+  # 你可以改成：eastasia / southeastasia / japaneast / australiasoutheast / northeurope ...
   Location: eastus
 
-  # Deployment naming
   Prefix: tunis
   EnvironmentName: dev
-  UniqueId: '1280' # consider: $(Build.BuildId)
+  UniqueId: '1280'
 
   ResourceGroupName: $(Prefix)-$(EnvironmentName)-$(UniqueId)-RG
   WebAppName: $(Prefix)-$(EnvironmentName)-$(UniqueId)
@@ -56,7 +49,7 @@ variables:
   hostingPlanName: $(Prefix)-service-plan
 
   Database.Admin: houssem
-  Database.Password: '@Aa123456' # to be secured in Key Vault
+  Database.Password: '@Aa123456'
   Database.Name: EmployeesDB
 
 stages:
@@ -69,7 +62,6 @@ stages:
           vmImage: windows-2022
         steps:
           - checkout: self
-
           - task: UseDotNet@2
             displayName: Install .NET 6 SDK
             inputs:
@@ -86,8 +78,6 @@ stages:
               - pwsh: |
                   $proj = Get-ChildItem -Recurse -Filter WebApp.csproj | Select-Object -First 1
                   if (-not $proj) { throw 'WebApp.csproj not found.' }
-
-                  Write-Host "Running: dotnet list package --vulnerable --include-transitive"
                   dotnet list "$($proj.FullName)" package --vulnerable --include-transitive
                 displayName: Report vulnerable NuGet packages (dotnet list)
 
@@ -139,11 +129,8 @@ stages:
               nuget install Microsoft.NETFramework.ReferenceAssemblies.net45 -OutputDirectory $outRoot -ExcludeVersion
 
               $net45Path = Join-Path $outRoot 'Microsoft.NETFramework.ReferenceAssemblies.net45\build\.NETFramework\v4.5'
-              if (-not (Test-Path $net45Path)) {
-                throw "Expected net45 reference assemblies at: $net45Path"
-              }
+              if (-not (Test-Path $net45Path)) { throw "Expected net45 reference assemblies at: $net45Path" }
 
-              Write-Host "Using FrameworkPathOverride=$net45Path"
               Write-Host "##vso[task.setvariable variable=FrameworkPathOverride]$net45Path"
             displayName: Provide .NET Framework 4.5 reference assemblies
 
@@ -192,7 +179,6 @@ stages:
           vmImage: ubuntu-22.04
         steps:
           - checkout: self
-
           - task: PublishPipelineArtifact@1
             displayName: Publish Artifact (ARM templates)
             inputs:
@@ -216,13 +202,47 @@ stages:
               artifact: arm
               path: $(System.DefaultWorkingDirectory)
 
+          # ✅ NEW：挑選「訂閱允許」的 region，並建立 RG（同時把最後採用的 region 印出來）
+          - task: AzureCLI@2
+            displayName: Pick eligible region + create RG
+            inputs:
+              azureSubscription: $(azureSubscription)
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                set -e
+
+                echo "== Subscription =="
+                az account show --query "{name:name, id:id, tenantId:tenantId}" -o json
+
+                echo "== Allowed locations (top 30) =="
+                az account list-locations --query "[0:30].{name:name, displayName:displayName}" -o table
+
+                TARGET="$(Location)"
+                echo "Requested location: $TARGET"
+
+                OK=$(az account list-locations --query "[?name=='$TARGET'] | length(@)" -o tsv)
+                if [ "$OK" != "1" ]; then
+                  echo "##vso[task.logissue type=warning]Location '$TARGET' not allowed. Falling back to 'southeastasia'."
+                  TARGET="southeastasia"
+                  OK2=$(az account list-locations --query "[?name=='$TARGET'] | length(@)" -o tsv)
+                  if [ "$OK2" != "1" ]; then
+                    echo "##vso[task.logissue type=warning]Fallback 'southeastasia' not allowed. Falling back to 'eastus'."
+                    TARGET="eastus"
+                  fi
+                fi
+
+                echo "Using location: $TARGET"
+                echo "##vso[task.setvariable variable=Location]$TARGET"
+
+                az group create -n "$(ResourceGroupName)" -l "$TARGET" -o table
+
           - task: AzureResourceGroupDeployment@2
             displayName: Validate ARM templates
             inputs:
               azureSubscription: $(azureSubscription)
               action: Create Or Update Resource Group
               resourceGroupName: $(ResourceGroupName)
-              # ✅ FIX: 改用變數 Location
               location: $(Location)
               templateLocation: Linked artifact
               csmFile: $(System.DefaultWorkingDirectory)/WebSiteSQLDatabase.json
@@ -246,7 +266,6 @@ stages:
               - pwsh: |
                   Set-StrictMode -Version Latest
                   $ErrorActionPreference = 'Stop'
-
                   Install-Module PSRule -Scope CurrentUser -Force -AllowClobber
                   Install-Module PSRule.Rules.Azure -Scope CurrentUser -Force -AllowClobber
 
@@ -272,6 +291,8 @@ stages:
               scriptLocation: inlineScript
               workingDirectory: $(System.DefaultWorkingDirectory)
               inlineScript: |
+                set -e
+                echo "Using location: $(Location)"
                 az deployment group what-if \
                   --resource-group "$(ResourceGroupName)" \
                   --name rollout01 \
@@ -297,7 +318,6 @@ stages:
               azureResourceManagerConnection: $(azureSubscription)
               action: Create Or Update Resource Group
               resourceGroupName: $(ResourceGroupName)
-              # ✅ FIX: 改用變數 Location
               location: $(Location)
               templateLocation: Linked artifact
               csmFile: $(System.DefaultWorkingDirectory)/WebSiteSQLDatabase.json
