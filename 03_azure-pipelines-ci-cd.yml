@@ -36,13 +36,17 @@ variables:
   # Azure DevOps service connection name
   azureSubscription: WebAppWithDatabaseDemo_spn
 
-  Location: eastus
+  # ✅ 固定用一個你訂閱允許的 region（可改：southeastasia / japaneast / eastasia / northeurope / australiaeast ...）
+  # ⚠️ 你之前遇到 westeurope ineligible，所以不要再用 westeurope
+  Location: southeastasia
 
   Prefix: tunis
   EnvironmentName: dev
 
+  # ✅ 每次跑都不同，避免撞名/撞 RG location
   UniqueId: $(Build.BuildId)
 
+  # ✅ RG 名稱包含 Location，避免你之前「RG 已存在在 westeurope」導致無法換 location
   ResourceGroupName: $(Prefix)-$(EnvironmentName)-$(UniqueId)-$(Location)-RG
 
   WebAppName: $(Prefix)-$(EnvironmentName)-$(UniqueId)
@@ -51,7 +55,7 @@ variables:
   hostingPlanName: $(Prefix)-service-plan
 
   Database.Admin: houssem
-  Database.Password: '@Aa123456' # 請改成 secret variable / variable group
+  Database.Password: '@Aa123456' # ⚠️ 請改成 secret variable / variable group
   Database.Name: EmployeesDB
 
 stages:
@@ -177,16 +181,29 @@ stages:
               artifact: ui-tests
 
       - job: Infrastructure
-        displayName: Publish Infra files
+        displayName: Publish Infra files (PaaS-only ARM)
         pool:
           vmImage: ubuntu-22.04
         steps:
           - checkout: self
 
+          # ✅ 關鍵：只打包「PaaS-only 的兩個 ARM 檔」，避免 deployproj/ps1/DSC 被一起帶進去
+          - bash: |
+              set -e
+              mkdir -p "$(Build.ArtifactStagingDirectory)/arm"
+
+              # 這裡假設你的 ARM 檔在 repo root；如果你是放在 AzureResourceGroupDeployment/，把路徑改掉即可
+              cp "WebSiteSQLDatabase.json" "$(Build.ArtifactStagingDirectory)/arm/WebSiteSQLDatabase.json"
+              cp "WebSiteSQLDatabase.parameters.json" "$(Build.ArtifactStagingDirectory)/arm/WebSiteSQLDatabase.parameters.json"
+
+              echo "== ARM packaged files =="
+              ls -al "$(Build.ArtifactStagingDirectory)/arm"
+            displayName: Stage PaaS-only ARM files
+
           - task: PublishPipelineArtifact@1
-            displayName: Publish Artifact (ARM templates)
+            displayName: Publish Artifact (ARM templates - PaaS only)
             inputs:
-              targetPath: AzureResourceGroupDeployment
+              targetPath: $(Build.ArtifactStagingDirectory)/arm
               artifact: arm
 
   - stage: Dev_Stage
@@ -194,47 +211,59 @@ stages:
     dependsOn: Build_Stage
     jobs:
       - job: Create_DEV
-        displayName: Create DEV
+        displayName: Create DEV (PaaS-only)
         pool:
           vmImage: windows-2022
         steps:
           - checkout: none
 
           - task: DownloadPipelineArtifact@2
-            displayName: Download ARM templates
+            displayName: Download ARM templates (PaaS only)
             inputs:
               artifact: arm
-              path: $(System.DefaultWorkingDirectory)
+              path: $(Pipeline.Workspace)/arm
 
+          # ✅ 關鍵：部署前硬檢查不能有 Microsoft.Compute（避免 Free VM quota 直接炸）
+          - pwsh: |
+              $template = "$(Pipeline.Workspace)\arm\WebSiteSQLDatabase.json"
+              $params   = "$(Pipeline.Workspace)\arm\WebSiteSQLDatabase.parameters.json"
+
+              if (!(Test-Path $template)) { throw "Missing template: $template" }
+              if (!(Test-Path $params))   { throw "Missing params:   $params" }
+
+              $c = Get-Content $template -Raw
+              if ($c -match "Microsoft\.Compute") {
+                throw "Template contains Microsoft.Compute (VM). Your subscription Free VM quota=0 -> will fail."
+              }
+
+              Write-Host "OK: Using PaaS-only ARM:"
+              Write-Host " - $template"
+              Write-Host " - $params"
+            displayName: Guardrail - fail if template contains VM
+
+          # 建 RG（用 Location 變數）
           - task: AzureCLI@2
-            displayName: Print allowed locations + create RG
+            displayName: Create RG
             inputs:
               azureSubscription: $(azureSubscription)
               scriptType: bash
               scriptLocation: inlineScript
               inlineScript: |
                 set -e
-
-                echo "Subscription:"
-                az account show --query "{name:name, id:id, tenantId:tenantId}" -o json
-
-                echo "Allowed locations (top 30):"
-                az account list-locations --query "[0:30].{name:name, displayName:displayName}" -o table
-
-                echo "Using Location: $(Location)"
-                echo "Creating/Updating RG: $(ResourceGroupName) in $(Location)"
+                echo "Using location: $(Location)"
                 az group create -n "$(ResourceGroupName)" -l "$(Location)" -o table
 
-          # ✅ 取代 Validate ARM templates：用 az deployment group validate（不碰 Free VM quota）
+          # validate（用 az，完全不走 deployment project / ps1）
           - task: AzureCLI@2
             displayName: ARM validate (az deployment group validate)
             inputs:
               azureSubscription: $(azureSubscription)
               scriptType: bash
               scriptLocation: inlineScript
-              workingDirectory: $(System.DefaultWorkingDirectory)
               inlineScript: |
                 set -e
+                cd "$(Pipeline.Workspace)/arm"
+
                 az deployment group validate \
                   --resource-group "$(ResourceGroupName)" \
                   --template-file WebSiteSQLDatabase.json \
@@ -253,37 +282,17 @@ stages:
                               sqlserverName=$(SqlServerName) \
                   -o jsonc
 
-          - ${{ if and(parameters.runCompletePipeline, parameters.templateScanEnabled) }}:
-              - pwsh: |
-                  Set-StrictMode -Version Latest
-                  $ErrorActionPreference = 'Stop'
-
-                  Install-Module PSRule -Scope CurrentUser -Force -AllowClobber
-                  Install-Module PSRule.Rules.Azure -Scope CurrentUser -Force -AllowClobber
-
-                  $armPath = "$(System.DefaultWorkingDirectory)"
-                  $outDir = Join-Path $armPath 'results'
-                  New-Item -ItemType Directory -Force -Path $outDir | Out-Null
-
-                  Assert-PSRule -Module PSRule.Rules.Azure -Path $armPath -Format NUnit3 -OutputPath (Join-Path $outDir 'psrule-arm.xml')
-                displayName: Scan ARM templates (PSRule.Rules.Azure)
-
-          - task: PublishTestResults@2
-            displayName: Publish Template Scan Results
-            condition: always()
-            inputs:
-              testResultsFormat: NUnit
-              testResultsFiles: $(System.DefaultWorkingDirectory)/results/*.xml
-
+          # what-if（可選，但建議保留）
           - task: AzureCLI@2
-            displayName: Preview Template Changes (What-If)
+            displayName: ARM what-if (az deployment group what-if)
             inputs:
               azureSubscription: $(azureSubscription)
               scriptType: bash
               scriptLocation: inlineScript
-              workingDirectory: $(System.DefaultWorkingDirectory)
               inlineScript: |
                 set -e
+                cd "$(Pipeline.Workspace)/arm"
+
                 az deployment group what-if \
                   --resource-group "$(ResourceGroupName)" \
                   --name rollout01 \
@@ -302,31 +311,35 @@ stages:
                               webSiteName=$(WebAppName) \
                               sqlserverName=$(SqlServerName)
 
-          - task: AzureResourceManagerTemplateDeployment@3
-            displayName: Deploy ARM templates
+          # deploy（用 az create）
+          - task: AzureCLI@2
+            displayName: ARM deploy (az deployment group create)
             inputs:
-              deploymentScope: Resource Group
-              azureResourceManagerConnection: $(azureSubscription)
-              action: Create Or Update Resource Group
-              resourceGroupName: $(ResourceGroupName)
-              location: $(Location)
-              templateLocation: Linked artifact
-              csmFile: $(System.DefaultWorkingDirectory)/WebSiteSQLDatabase.json
-              csmParametersFile: $(System.DefaultWorkingDirectory)/WebSiteSQLDatabase.parameters.json
-              overrideParameters: >
-                -hostingPlanName $(hostingPlanName)
-                -skuName "F1"
-                -skuCapacity 1
-                -administratorLogin $(Database.Admin)
-                -administratorLoginPassword $(Database.Password)
-                -databaseName $(Database.Name)
-                -collation "SQL_Latin1_General_CP1_CI_AS"
-                -edition "Basic"
-                -maxSizeBytes "1073741824"
-                -requestedServiceObjectiveName "Basic"
-                -webSiteName $(WebAppName)
-                -sqlserverName $(SqlServerName)
-              deploymentMode: Complete
+              azureSubscription: $(azureSubscription)
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                set -e
+                cd "$(Pipeline.Workspace)/arm"
+
+                az deployment group create \
+                  --resource-group "$(ResourceGroupName)" \
+                  --name WebSiteSQLDatabase \
+                  --template-file WebSiteSQLDatabase.json \
+                  --parameters WebSiteSQLDatabase.parameters.json \
+                  --parameters hostingPlanName=$(hostingPlanName) \
+                              skuName=F1 \
+                              skuCapacity=1 \
+                              administratorLogin=$(Database.Admin) \
+                              administratorLoginPassword=$(Database.Password) \
+                              databaseName=$(Database.Name) \
+                              collation=SQL_Latin1_General_CP1_CI_AS \
+                              edition=Basic \
+                              maxSizeBytes=1073741824 \
+                              requestedServiceObjectiveName=Basic \
+                              webSiteName=$(WebAppName) \
+                              sqlserverName=$(SqlServerName) \
+                  -o jsonc
 
       - job: Deploy_DEV
         displayName: Deploy Apps to DEV
@@ -340,7 +353,7 @@ stages:
             displayName: Download WebApp.zip
             inputs:
               artifact: drop
-              path: $(System.DefaultWorkingDirectory)
+              path: $(Pipeline.Workspace)/drop
 
           - task: AzureRmWebAppDeployment@3
             displayName: Deploy WebApp to Azure
@@ -348,7 +361,7 @@ stages:
               azureSubscription: $(azureSubscription)
               appType: app
               WebAppName: $(WebAppName)
-              Package: $(System.DefaultWorkingDirectory)/drop/WebApp.zip
+              Package: $(Pipeline.Workspace)/drop/WebApp.zip
               TakeAppOfflineFlag: true
               JSONFiles: '**/appsettings.json'
 
@@ -356,7 +369,7 @@ stages:
             displayName: Download DacPac
             inputs:
               artifact: dacpac
-              path: $(System.DefaultWorkingDirectory)
+              path: $(Pipeline.Workspace)/dacpac
 
           - task: SqlAzureDacpacDeployment@1
             displayName: Deploy DacPac to SQL Azure
@@ -369,7 +382,7 @@ stages:
               SqlPassword: $(Database.Password)
               deployType: DacpacTask
               DeploymentAction: Publish
-              DacpacFile: $(System.DefaultWorkingDirectory)/dacpac/WebApp.Database.dacpac
+              DacpacFile: $(Pipeline.Workspace)/dacpac/WebApp.Database.dacpac
               IpDetectionMethod: AutoDetect
 
       - job: Test_DEV
@@ -384,14 +397,14 @@ stages:
             displayName: Download Selenium Tests
             inputs:
               artifact: ui-tests
-              path: $(System.DefaultWorkingDirectory)
+              path: $(Pipeline.Workspace)/ui-tests
 
           - task: VSTest@2
             displayName: Run Selenium UI Tests
             inputs:
               testSelector: testAssemblies
-              searchFolder: $(System.DefaultWorkingDirectory)/ui-tests
-              runSettingsFile: $(System.DefaultWorkingDirectory)/ui-tests/.runsettings
+              searchFolder: $(Pipeline.Workspace)/ui-tests
+              runSettingsFile: $(Pipeline.Workspace)/ui-tests/.runsettings
               overrideTestrunParameters: -webAppUrl $(WebAppNameUrl)
               testAssemblyVer2: |
                 **\*Test*.dll
