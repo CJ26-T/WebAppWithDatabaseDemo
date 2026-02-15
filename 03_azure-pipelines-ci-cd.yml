@@ -36,17 +36,13 @@ variables:
   # Azure DevOps service connection name
   azureSubscription: WebAppWithDatabaseDemo_spn
 
-  # ✅ 解法1關鍵：固定使用一個你訂閱允許的 region（用代碼）
-  # 可改：southeastasia / japaneast / eastasia / northeurope / australiaeast ...
   Location: eastus
 
   Prefix: tunis
   EnvironmentName: dev
 
-  # ✅ 建議：避免重跑撞名
   UniqueId: $(Build.BuildId)
 
-  # ✅ 解法1關鍵：RG 名稱包含 Location，避免舊 RG 卡死在 westeurope
   ResourceGroupName: $(Prefix)-$(EnvironmentName)-$(UniqueId)-$(Location)-RG
 
   WebAppName: $(Prefix)-$(EnvironmentName)-$(UniqueId)
@@ -210,7 +206,6 @@ stages:
               artifact: arm
               path: $(System.DefaultWorkingDirectory)
 
-          # ✅ 解法1：只印 locations + 建 RG（RG 名稱已含 location，不會撞舊的 westeurope RG）
           - task: AzureCLI@2
             displayName: Print allowed locations + create RG
             inputs:
@@ -230,30 +225,33 @@ stages:
                 echo "Creating/Updating RG: $(ResourceGroupName) in $(Location)"
                 az group create -n "$(ResourceGroupName)" -l "$(Location)" -o table
 
-          - task: AzureResourceGroupDeployment@2
-            displayName: Validate ARM templates
+          # ✅ 取代 Validate ARM templates：用 az deployment group validate（不碰 Free VM quota）
+          - task: AzureCLI@2
+            displayName: ARM validate (az deployment group validate)
             inputs:
               azureSubscription: $(azureSubscription)
-              action: Create Or Update Resource Group
-              resourceGroupName: $(ResourceGroupName)
-              location: $(Location)
-              templateLocation: Linked artifact
-              csmFile: $(System.DefaultWorkingDirectory)/WebSiteSQLDatabase.json
-              csmParametersFile: $(System.DefaultWorkingDirectory)/WebSiteSQLDatabase.parameters.json
-              overrideParameters: >
-                -hostingPlanName $(hostingPlanName)
-                -skuName "F1"
-                -skuCapacity 1
-                -administratorLogin $(Database.Admin)
-                -administratorLoginPassword $(Database.Password)
-                -databaseName $(Database.Name)
-                -collation "SQL_Latin1_General_CP1_CI_AS"
-                -edition "Basic"
-                -maxSizeBytes "1073741824"
-                -requestedServiceObjectiveName "Basic"
-                -webSiteName $(WebAppName)
-                -sqlserverName $(SqlServerName)
-              deploymentMode: Validation
+              scriptType: bash
+              scriptLocation: inlineScript
+              workingDirectory: $(System.DefaultWorkingDirectory)
+              inlineScript: |
+                set -e
+                az deployment group validate \
+                  --resource-group "$(ResourceGroupName)" \
+                  --template-file WebSiteSQLDatabase.json \
+                  --parameters WebSiteSQLDatabase.parameters.json \
+                  --parameters hostingPlanName=$(hostingPlanName) \
+                              skuName=F1 \
+                              skuCapacity=1 \
+                              administratorLogin=$(Database.Admin) \
+                              administratorLoginPassword=$(Database.Password) \
+                              databaseName=$(Database.Name) \
+                              collation=SQL_Latin1_General_CP1_CI_AS \
+                              edition=Basic \
+                              maxSizeBytes=1073741824 \
+                              requestedServiceObjectiveName=Basic \
+                              webSiteName=$(WebAppName) \
+                              sqlserverName=$(SqlServerName) \
+                  -o jsonc
 
           - ${{ if and(parameters.runCompletePipeline, parameters.templateScanEnabled) }}:
               - pwsh: |
@@ -286,8 +284,6 @@ stages:
               workingDirectory: $(System.DefaultWorkingDirectory)
               inlineScript: |
                 set -e
-                echo "Using RG: $(ResourceGroupName)"
-                echo "Using location: $(Location)"
                 az deployment group what-if \
                   --resource-group "$(ResourceGroupName)" \
                   --name rollout01 \
